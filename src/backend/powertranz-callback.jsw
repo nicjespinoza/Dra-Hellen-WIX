@@ -1,0 +1,44 @@
+import { ok, serverError } from 'wix-http-functions';
+import wixData from 'wix-data';
+
+// Este es el callback que Powertranz llama al finalizar la transacción 3DS
+export async function post_powertranzCallback(request) {
+    try {
+        const data = await request.body.json();
+
+        const transactionId = data.TransactionIdentifier;
+        const status = data.Approved ? 'completed' : 'failed';
+
+        const transaction = await wixData.query('Transacciones')
+            .eq('transactionIdentifier', transactionId)
+            .find()
+            .then(res => res.items[0]);
+
+        if (transaction) {
+            await wixData.update('Transacciones', {
+                _id: transaction._id,
+                status: status,
+                responseMessage: data.ResponseMessage,
+                authorizationCode: data.AuthorizationCode,
+                timestamp: new Date()
+            });
+
+            await wixData.insert('Reporte', {
+                transactionIdentifier: transactionId,
+                orderId: transaction.orderId,
+                userId: transaction.userId,
+                resultMessage: data.ResponseMessage,
+                responseCode: data.IsoResponseCode,
+                isoResponseCode: data.IsoResponseCode,
+                approved: data.Approved,
+                amount: data.TotalAmount,
+                date: new Date()
+            });
+        }
+
+        return ok({ success: true });
+    } catch (error) {
+        console.error("Callback Error:", error);
+        return serverError({ error: error.message });
+    }
+}

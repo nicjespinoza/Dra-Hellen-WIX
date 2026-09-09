@@ -1,0 +1,338 @@
+import wixData from 'wix-data';
+import wixSecretsBackend from 'wix-secrets-backend';
+import { fetch } from 'wix-fetch';
+import { v4 as uuidv4 } from 'uuid';
+
+async function getCredentials() {
+    const secretName = 'powertranzCredentials';
+    try {
+        const secrets = await wixSecretsBackend.getSecret(secretName);
+        const { powertranzId, powertranzPassword, PowertranzPageSet, PowertranzPageName, powertranzSecret } = JSON.parse(secrets);
+        
+        if (!powertranzId || !powertranzPassword) {
+            throw new Error('Credenciales incompletas');
+        }
+        
+        return {
+            powertranzId,
+            powertranzPassword,
+            PowertranzPageSet: PowertranzPageSet || 'PTZ/HellenAraya',
+            PowertranzPageName: PowertranzPageName || 'PaginaPago',
+            powertranzSecret
+        };
+    } catch (error) {
+        await logEvent('ERROR', 'Error al obtener credenciales', {
+            error: error.message,
+            stack: error.stack
+        });
+        throw error;
+    }
+}
+
+async function retryFetch(url, options, retries = 3, delay = 1000) {
+    for (let attempt = 1; attempt <= retries; attempt++) {
+        try {
+            const response = await fetch(url, options);
+            
+            // Verificar si la respuesta es vacía
+            const responseText = await response.text();
+            if (!responseText.trim()) {
+                throw new Error(`Respuesta vacía recibida (HTTP ${response.status})`);
+            }
+            
+            // Intentar parsear JSON para verificar validez
+            try {
+                JSON.parse(responseText);
+            } catch (e) {
+                throw new Error(`Respuesta no es JSON válido: ${responseText.substring(0, 100)}`);
+            }
+            
+            return {
+                ok: response.ok,
+                status: response.status,
+                statusText: response.statusText,
+                headers: response.headers,
+                text: () => Promise.resolve(responseText),
+                json: () => Promise.resolve(JSON.parse(responseText))
+            };
+            
+        } catch (error) {
+            if (attempt === retries) {
+                await logEvent('ERROR', `Intento ${attempt} fallido para ${url}`, {
+                    error: error.message,
+                    stack: error.stack,
+                    responseText: error.message.includes('Respuesta vacía') ? '' : undefined
+                });
+                throw error;
+            }
+            
+            await logEvent('WARN', `Reintentando solicitud (${attempt}/${retries})`, {
+                url,
+                error: error.message,
+                nextAttemptIn: `${delay * attempt}ms`
+            });
+            
+            await new Promise(resolve => setTimeout(resolve, delay * attempt));
+        }
+    }
+}
+
+async function logEvent(level, message, context = {}) {
+    try {
+        const logEntry = {
+            timestamp: new Date(),
+            level,
+            message,
+            context: JSON.stringify(context, null, 2)
+        };
+        await wixData.insert('logs', logEntry);
+    } catch (error) {
+        console.error('Error al registrar log:', error);
+    }
+}
+
+function cleanString(str) {
+    return str ? str.replace(/[^a-zA-Z0-9\s-_]/g, '') : '';
+}
+
+export async function initTransaction(userId, orderId, amount, billingAddress, sessionId, bypass3DS = false) {
+    try {
+        await logEvent('DEBUG', 'Iniciando transacción', {
+            userId,
+            orderId,
+            amount,
+            sessionId: sessionId || 'N/A'
+        });
+
+        // Validaciones más estrictas
+        if (!userId || !orderId || isNaN(amount) || !billingAddress) {
+            throw new Error('Parámetros requeridos faltantes o inválidos');
+        }
+
+        const transactionId = uuidv4();
+        const csrfToken = uuidv4();
+        const expiresAt = new Date(Date.now() + 10 * 60 * 1000); // 10 minutos
+
+        await wixData.insert('CsrfTokens', {
+            userId,
+            csrfToken,
+            transactionId,
+            sessionId,
+            amount,
+            orderId,
+            expiresAt
+        });
+
+        const { powertranzId, powertranzPassword, PowertranzPageSet, PowertranzPageName } = await getCredentials();
+
+        const payload = {
+            TransactionIdentifier: transactionId,
+            TotalAmount: Number(amount).toFixed(2),
+            CurrencyCode: '558', // Código para NIO
+            ThreeDSecure: !bypass3DS,
+            Tokenize: true,
+            FraudCheck: false,
+            OrderIdentifier: orderId,
+            BillingAddress: {
+                FirstName: cleanString(billingAddress.FirstName) || 'Cliente',
+                LastName: cleanString(billingAddress.LastName) || 'Desconocido',
+                Line1: cleanString(billingAddress.Line1) || 'Sin direccion',
+                City: cleanString(billingAddress.City) || 'Desconocido',
+               // State: cleanString(billingAddress.State) || 'MN',
+              //  PostalCode: cleanString(billingAddress.PostalCode) || '10001',
+                CountryCode: '558'|| '558', // Código para Nicaragua
+                EmailAddress: billingAddress.EmailAddress || 'noemail@example.com',
+                PhoneNumber: cleanString(billingAddress.PhoneNumber) || '89776879'
+            },
+            AddressMatch: false,
+            ExtendedData: {
+                ThreeDSecure: bypass3DS ? {} : {
+                    ChallengeWindowSize: '05', // Corregido según documentación (valores 01-05)
+                    ChallengeIndicator: bypass3DS ? '04' : '01',
+                    AuthenticationIndicator: '01',
+                    MessageCategory: '01'
+                },
+                MerchantResponseUrl: 'https://www.hellenaraya.com/_functions/payment',
+                HostedPage: {
+                    PageSet: PowertranzPageSet,
+                    PageName: PowertranzPageName
+                }
+            }
+        };
+
+        const response = await retryFetch('https://staging.ptranz.com/api/spi/sale', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'Powertranz-PowertranzId': powertranzId,
+                'Powertranz-PowertranzPassword': powertranzPassword,
+                'Accept': 'application/json'
+            },
+            body: JSON.stringify(payload)
+        });
+
+        const result = await response.json();
+
+        if (!response.ok) {
+            const errorDetails = result?.Errors || [{
+                Code: 'HTTP_' + response.status,
+                Message: result.ResponseMessage || `Error ${response.status}: ${response.statusText}`
+            }];
+            throw new Error(errorDetails[0].Message);
+        }
+
+        if (result.IsoResponseCode === 'SP4' && result.RedirectData && result.SpiToken) {
+            return {
+                success: true,
+                redirectData: result.RedirectData,
+                transactionId: result.TransactionIdentifier,
+                spiToken: result.SpiToken,
+                orderId,
+                csrfToken,
+                sessionId,
+                amount
+            };
+        } else {
+            throw new Error(result.ResponseMessage || 'Respuesta inválida de PowerTranz');
+        }
+    } catch (error) {
+        await logEvent('ERROR', 'Error en initTransaction', {
+            error: error.message,
+            stack: error.stack,
+            userId,
+            orderId
+        });
+        throw error;
+    }
+}
+ 
+export async function completePayment(spiToken, transactionId, userId, csrfToken, sessionId, powertranzResponse = {}) {
+    try {
+        // Validaciones mejoradas
+        if (!spiToken || spiToken.length < 20) {
+            throw new Error('SpiToken inválido');
+        }
+
+        if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(transactionId)) {
+            throw new Error('TransactionIdentifier inválido');
+        }
+
+        // Verificar token CSRF (esta lógica de seguridad es correcta y debe mantenerse)
+        const tokenRecord = await wixData.query('CsrfTokens')
+            .eq('userId', userId)
+            .eq('csrfToken', csrfToken)
+            .eq('transactionId', transactionId)
+            .eq('sessionId', sessionId)
+            .ge('expiresAt', new Date())
+            .find()
+            .then(results => results.items[0]);
+
+        if (!tokenRecord) {
+            throw new Error('Token CSRF inválido o expirado');
+        }
+
+        const { powertranzId, powertranzPassword } = await getCredentials();
+
+        // Registrar para depuración que estamos a punto de llamar a la API
+        await logEvent('DEBUG', 'Enviando solicitud a /api/spi/payment', {
+            transactionId,
+            spiToken: spiToken.substring(0, 5) + '...',
+        });
+
+        // ----- INICIO DE LA CORRECCIÓN -----
+
+        const response = await retryFetch('https://staging.ptranz.com/api/spi/payment', {
+            method: 'POST',
+            headers: {
+                // La documentación muestra "application/json-patch+json", pero "application/json"
+                // usualmente también funciona. El cambio clave es el `body`.
+                'Content-Type': 'application/json', 
+                'Powertranz-PowertranzId': powertranzId,
+                'Powertranz-PowertranzPassword': powertranzPassword,
+                'Accept': 'application/json',
+                'User-Agent': 'Wix-Velo/1.0'
+            },
+            // El cuerpo de la solicitud debe ser el SpiToken como texto plano,
+            // envuelto en comillas para que sea un JSON string válido.
+            body: JSON.stringify(spiToken) 
+        });
+
+        // ----- FIN DE LA CORRECCIÓN -----
+
+        const result = await response.json();
+
+        // Registrar la respuesta completa para futura depuración
+        await logEvent('INFO', 'Respuesta recibida de /api/spi/payment', {
+            transactionId,
+            status: response.status,
+            response: JSON.stringify(result, null, 2)
+        });
+
+        if (!response.ok) {
+            const errorDetails = result?.Errors || [{
+                Code: 'HTTP_' + response.status,
+                Message: result?.ResponseMessage || `Error ${response.status}: ${response.statusText}`
+            }];
+            throw new Error(errorDetails[0].Message);
+        }
+
+        // Verificar código de respuesta ISO para éxito ("00")
+        if (result.IsoResponseCode === '00' && result.Approved === true) {
+            await logEvent('INFO', 'Pago aprobado por PowerTranz', {
+                transactionId,
+                responseCode: result.IsoResponseCode,
+                result: JSON.stringify(result, null, 2)
+            });
+            return { success: true, result };
+        } else {
+            throw new Error(result.ResponseMessage || `Pago no aprobado (Código: ${result.IsoResponseCode})`);
+        }
+    } catch (error) {
+        await logEvent('ERROR', 'Error en completePayment', {
+            error: error.message,
+            stack: error.stack,
+            spiToken: spiToken ? spiToken.substring(0, 5) + '...' : 'N/A',
+            transactionId
+        });
+        
+        return {
+            success: false,
+            message: error.message,
+            details: [{
+                Code: error.code || 'UNKNOWN',
+                Message: error.message || 'Error desconocido'
+            }]
+        };
+    }
+}
+
+export async function reverseTransaction(userId, transactionId, orderId, amount) {
+    try {
+        const { powertranzId, powertranzPassword } = await getCredentials();
+        
+        const response = await retryFetch('https://staging.ptranz.com/api/spi/void', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'Powertranz-PowertranzId': powertranzId,
+                'Powertranz-PowertranzPassword': powertranzPassword
+            },
+            body: JSON.stringify({ TransactionIdentifier: transactionId })
+        });
+
+        const result = await response.json();
+        
+        if (result.IsoResponseCode === '00') {
+            return { success: true, message: 'Reembolso procesado con éxito' };
+        } else {
+            throw new Error(result.ResponseMessage || 'No se pudo reversar la transacción');
+        }
+    } catch (error) {
+        await logEvent('ERROR', 'Error en reverseTransaction', {
+            error: error.message,
+            transactionId,
+            userId
+        });
+        throw error;
+    }
+}

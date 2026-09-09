@@ -1,0 +1,24 @@
+{
+  "devDependencies": {
+    "@wix/cli": "^1.0.0",
+    "@wix/eslint-plugin-cli": "^1.0.0",
+    "eslint": "^8.25.0",
+    "react": "16.14.0"
+  },
+  "dependencies": {
+    "joi": "17.13.3",
+    "wix-fetch": "0.0.0",
+    "uuid": "11.1.0",
+    "@wix/data": "1.0.241",
+    "card-validator": "10.0.2",
+    "cloudinary": "1.22.0",
+    "@wix/site-storage": "1.21.0",
+    "wix-http-functions": "0.0.0",
+    "wix-secrets-backend": "0.0.1-security"
+  },
+  "scripts": {
+    "postinstall": "wix sync-types",
+    "dev": "wix dev",
+    "lint": "eslint ."
+  }
+}

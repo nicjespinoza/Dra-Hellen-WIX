@@ -1,0 +1,68 @@
+import wixData from 'wix-data'
+     
+    // funcion suma todas las columnas de la base de datos
+    
+    
+    export function getTotal(database) {
+    
+        return wixData.aggregate(database)
+            .count()
+            .run()
+            .then((result) => {
+    
+                return result.items[0].count
+    
+            }).catch((error) => {
+                console.error('Error al obtener conteo:', error);
+                throw new Error('Error al obtener conteo');
+            });
+    }
+
+     
+    export function getTotal1(database) {
+    
+        return wixData.aggregate(database)
+            .group('status')
+            .count()
+            .run()
+            .then((result) => {
+    
+                return result.items
+    
+            }).catch((error) => {
+                console.error('Error al obtener datos multiples y conteo', error);
+                throw new Error('Error al obtener datos multiples y conteo');
+            });
+    }
+
+     export function getregistro(database) {
+    
+        return wixData.aggregate(database)
+            .group('status')
+            .count()
+            .run()
+            .then((result) => {
+    
+                return result.items
+    
+            }).catch((error) => {
+                console.error('Error al obtener datos multiples y conteo', error);
+                throw new Error('Error al obtener datos multiples y conteo');
+            });
+    }
+
+    export function getSexo(database) {
+    
+        return wixData.aggregate(database)
+            .group('gender')
+            .count()
+            .run()
+            .then((result) => {
+    
+                return result.items
+    
+            }).catch((error) => {
+                console.error('Error al obtener datos multiples y conteo', error);
+                throw new Error('Error al obtener datos multiples y conteo');
+            });
+    }

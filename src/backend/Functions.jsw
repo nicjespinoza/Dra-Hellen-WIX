@@ -1,0 +1,183 @@
+import wixData from 'wix-data';
+import wixUsers from 'wix-users-backend';
+import {fetch} from 'wix-fetch';
+
+
+
+export function updatePostActivity(userId, postId, postCreatedBy, like, dislike, bookmark){
+
+	wixData.query("dbuser")
+	.eq("postId", postId)
+	.eq("createdBy", userId)
+	.limit(1)
+	.find()
+	.then((results) => {
+
+		// create a new entry because one doesn't exist
+		if(results.items.length === 0){
+
+			let rand = Math.random().toString(36).substr(2,3);
+	    	let hours = Math.round( Date.now() / 1000 / 60 / 60 )
+	    	let generatedId = rand.toString() + hours.toString();
+
+			let toInsert = {
+				"activityId": generatedId,
+				"postId": postId,
+				"createdBy": userId,
+				"liked": Number(like),
+				
+			}
+
+			wixData.insert("dbuser", toInsert);
+
+		// updated an existing entry
+		} else {
+
+			let item = results.items[0];
+			if(like === 1) item.liked = Number(1);
+			if(like === -1) item.liked = Number(0);
+			
+
+			wixData.update("PostsActivity", item);
+
+		}
+
+	})
+
+}
+
+
+
+
+export async function getRepData(currentUser = 'Unknown', setLimit){
+
+	let postInfo = await wixData.query("dbuser")
+	.eq('display', "Y")
+	.descending('_createdDate')
+	.limit(setLimit)
+	.find();
+
+	let createdBy = postInfo.items.map( (item) => {
+		return item.createdBy
+	});
+	let postsArray = postInfo.items.map( (item) => {
+		return item._id
+	});
+	
+	let people = await wixData.query("User")
+	.hasSome('_id', createdBy)
+	.limit(setLimit)
+	.find();
+
+	let repeaterData = postInfo.items.map( (item) => {
+
+		return {
+			"_id": item._id,
+			"_createdDate": item._createdDate,
+			"postId": item.postId,
+			"title": item.title,
+			"categoria": item.categoria,
+			"precio" : item.precio,
+			"createdBy": item.createdBy,
+			"imagenprincipal": item.imagenprincipal,
+			"userName": null,
+			"views": item.views.toString(),
+			"likes": item.likes.toString(),
+			"dislikes": item.dislikes.toString(),
+			"comments": item.comments.toString(),
+			"country": item.country,
+			"rank": item.rank,
+			"userLiked": 0,
+			"userDisliked": 0,
+			"userBookmarked": 0
+		};
+
+	});
+
+	for (let y = 0; y <= repeaterData.length; y++) {
+		
+		if( y < repeaterData.length ){
+
+			if(repeaterData[y].title.length > 37){ repeaterData[y].title = repeaterData[y].title.substring(0,37) + "..."; }
+			
+			
+				
+			for (let x = 0; x < people.length; x++) {
+
+				if(repeaterData[y].createdBy === people.items[x]._id ){
+
+					
+					repeaterData[y].userName = people.items[x].userName;
+
+					break;
+				}
+
+			}
+
+		} else {
+
+			return repeaterData;
+
+		}
+
+	}
+
+}
+
+
+export async function scrapePage(url) {
+
+	let httpRes = await fetch(url);
+	let html = await httpRes.text();
+
+	let regExImage = /property= "og:image" content="(.*?)"/g;
+	let regExTitle = /property= "og:title" content="(.*?)"/g;
+	let regExDesc = /property= "og:description" content="(.*?)"/g;
+
+	let scrapeObj = {
+
+		"scrapeImage" : regExImage.exec(html) [1],
+		"scrapeTitle" : regExTitle.exec(html) [1],
+		"scrapeDesc"  : regExDesc.exec(html) [1],
+	}
+
+	return scrapeObj;
+}
+
+
+export function sendCode(userId, userName, seed){
+
+	let code = Math.round(Number(seed) / 7 + 123) * 5 + 456;
+
+	code = code.toString();
+
+
+	wixUsers.emailUser("TFv67ob", userId, {
+	variables: {
+		userName: userName,
+		verifyCode: code
+	
+	}})
+
+	.then(() => {
+		return {"status": "sent"}
+	})
+	.catch((err) => {
+		return {"status": err}
+	})
+
+}
+export function verifyCode(seed, inputCode){
+
+	let code = Math.round(Number(seed) / 7 + 123) * 5 + 456;
+
+	if(code.toString() === inputCode.toString()){ 
+		return{ "test": true}; 
+		}
+	else { return { "test": false}; 
+	
+	}
+
+	}
+
+	
